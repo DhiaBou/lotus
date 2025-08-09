@@ -1,21 +1,17 @@
-import numpy as np
-import torch
-from numpy.typing import NDArray
-from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
-
-from lotus.dtype_extensions import convert_to_base_data
-from lotus.models.rm import RM
-
 import io
 import re
 import requests
 from urllib.parse import urlparse
-from typing import Iterable
-from PIL import Image
+from typing import List, Tuple
+
 import numpy as np
 import torch
+from numpy.typing import NDArray
+from PIL import Image
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+
+from lotus.dtype_extensions import convert_to_base_data
 from lotus.models.rm import RM
 
 IMG_EXT_RE = re.compile(r"\.(png|jpe?g|webp|bmp|gif|tiff?)($|\?)", re.IGNORECASE)
@@ -43,22 +39,32 @@ class SentenceTransformersRM(RM):
         normalize_embeddings: bool = True,
         device: str | None = None,
     ):
-        self.model_name = model
-        self.max_batch_size = max_batch_size
-        self.normalize = normalize_embeddings
-        self.model = SentenceTransformer(model, device=device)
+        self.model_name: str = model
+        self.max_batch_size: int = max_batch_size
+        self.normalize: bool = normalize_embeddings
 
-    def _encode_text_batch(self, batch: list[str]) -> np.ndarray:
+        self.model: SentenceTransformer = SentenceTransformer(model, device=device)
+
+        # For CLIP text encoder (77 tokens). This makes ST truncate automatically.
+        if not hasattr(self.model, "max_seq_length") or self.model.max_seq_length is None:
+            self.model.max_seq_length = 77
+        else:
+            self.model.max_seq_length = min(self.model.max_seq_length, 77)
+
+    # ---- encoding helpers ----
+
+    def _encode_text_batch(self, batch: List[str]) -> NDArray[np.float32]:
+        clean = convert_to_base_data(batch)  # keep parity with old code
         with torch.no_grad():
             e = self.model.encode(
-                batch,
+                clean,
                 convert_to_tensor=True,
                 normalize_embeddings=self.normalize,
                 show_progress_bar=False,
             )
         return e.cpu().numpy()
 
-    def _encode_image_batch(self, batch_imgs: list[Image.Image]) -> np.ndarray:
+    def _encode_image_batch(self, batch_imgs: List[Image.Image]) -> NDArray[np.float32]:
         with torch.no_grad():
             e = self.model.encode(
                 batch_imgs,
@@ -68,11 +74,13 @@ class SentenceTransformersRM(RM):
             )
         return e.cpu().numpy()
 
-    def _embed(self, docs: list[str]) -> np.ndarray:
-        text_items: list[tuple[int, str]] = []
-        image_items: list[tuple[int, Image.Image]] = []
+    # ---- public API ----
 
-        # split
+    def _embed(self, docs: List[str]) -> NDArray[np.float32]:
+        text_items: List[Tuple[int, str]] = []
+        image_items: List[Tuple[int, Image.Image]] = []
+
+        # split / fetch
         for idx, d in enumerate(docs):
             if looks_like_image_url(d):
                 img = fetch_pil(d)
@@ -80,12 +88,13 @@ class SentenceTransformersRM(RM):
             else:
                 text_items.append((idx, d))
 
-        # encode in batches
-        vecs = [None] * len(docs)
+        vecs: List[np.ndarray | None] = [None] * len(docs)
 
         # images
         for i in range(0, len(image_items), self.max_batch_size):
-            chunk = image_items[i:i + self.max_batch_size]
+            chunk = image_items[i : i + self.max_batch_size]
+            if not chunk:
+                continue
             ids, imgs = zip(*chunk)
             emb = self._encode_image_batch(list(imgs))
             for j, v in zip(ids, emb):
@@ -93,12 +102,17 @@ class SentenceTransformersRM(RM):
 
         # text
         for i in range(0, len(text_items), self.max_batch_size):
-            chunk = text_items[i:i + self.max_batch_size]
+            chunk = text_items[i : i + self.max_batch_size]
+            if not chunk:
+                continue
             ids, txts = zip(*chunk)
             emb = self._encode_text_batch(list(txts))
             for j, v in zip(ids, emb):
                 vecs[j] = v
 
-        return np.vstack(vecs)
+        # sanity check
+        if any(v is None for v in vecs):
+            missing = [i for i, v in enumerate(vecs) if v is None]
+            raise ValueError(f"Some documents failed to embed: indices {missing}")
 
-
+        return np.vstack(vecs)  # float32 by default from ST

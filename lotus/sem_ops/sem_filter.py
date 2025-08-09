@@ -94,6 +94,51 @@ def sem_filter(
     )
 
 
+def find_cutoff_index(
+        docs: list[dict[str, Any]],
+        model: lotus.models.LM,
+        user_instruction: str,
+        default: bool = True,
+        **sem_filter_kwargs,
+) -> int:
+    """
+    Returns the number of leading docs for which sem_filter returns True.
+    I.e. the smallest k such that docs[:k] -> True, docs[k] -> False.
+
+    If the very first doc is False, returns 0.
+    If all docs are True, returns len(docs).
+    """
+    n = len(docs)
+    if n == 0:
+        return 0
+
+    # Test first and last to catch all-False or all-True
+    first_is_true = sem_filter([docs[0]], model, user_instruction,
+                               default=default, **sem_filter_kwargs).outputs[0]
+    if not first_is_true:
+        return 0
+
+    last_is_true = sem_filter([docs[-1]], model, user_instruction,
+                              default=default, **sem_filter_kwargs).outputs[0]
+    if last_is_true:
+        return n
+
+    # now we know: docs[0] → True, docs[-1] → False
+    lo, hi = 0, n - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        is_true = sem_filter([docs[mid]], model, user_instruction,
+                             default=default, **sem_filter_kwargs).outputs[0]
+        if is_true:
+            # cutoff is to the right
+            lo = mid + 1
+        else:
+            # cutoff is at or before mid
+            hi = mid
+    # lo == hi is the first index where sem_filter is False
+    return lo
+
+
 def learn_filter_cascade_thresholds(
     sample_multimodal_data: list[dict[str, Any]],
     lm: lotus.models.LM,
@@ -173,6 +218,7 @@ class SemFilterDataframe:
         safe_mode: bool = False,
         progress_bar_desc: str = "Filtering",
         additional_cot_instructions: str = "",
+        find_top_k: bool = True,
     ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
         """
         Applies semantic filter over a dataframe.
@@ -239,6 +285,41 @@ class SemFilterDataframe:
                 helper_examples_answers = helper_examples["Answer"].tolist()
                 if helper_strategy == ReasoningStrategy.COT and "Reasoning" in helper_examples.columns:
                     helper_cot_reasoning = helper_examples["Reasoning"].tolist()
+        if find_top_k:
+            if lotus.settings.rm is None:
+                raise ValueError("RM must be set in settings for find_top_k")
+
+            # 1) run similarity search over the full DataFrame
+            search_df = self._obj.sem_search(
+                col_li[0],
+                formatted_usr_instr,
+                K=len(self._obj),
+                return_scores=True,
+            )
+            # 2) convert the *ranked* DataFrame back to multimodal inputs
+            #    (so that sem_filter can be applied one-by-one)
+            ranked_multimodal = task_instructions.df2multimodal_info(search_df, col_li)
+
+            # 3) binary‐search for the largest k where sem_filter → True
+            k = find_cutoff_index(
+                ranked_multimodal,
+                lotus.settings.lm,
+                formatted_usr_instr,
+                default=default,
+                examples_multimodal_data=examples_multimodal_data,
+                examples_answers=examples_answers,
+                cot_reasoning=cot_reasoning,
+                strategy=strategy,
+                safe_mode=safe_mode,
+                additional_cot_instructions=additional_cot_instructions,
+            )
+
+            # 4) slice out the top‐k rows *in the original ordering*
+            #    using the indices preserved in search_df
+            topk_idx = search_df.index[:k]
+            new_df = self._obj.loc[topk_idx]
+            new_df.attrs["index_dirs"] = self._obj.attrs.get("index_dirs", None)
+            return new_df
 
         if cascade_args:
             proxy_model = cascade_args.proxy_model

@@ -220,3 +220,13 @@ class ReasoningStrategy(Enum):
     COT = auto()
     ZS_COT = auto()
     FEW_SHOT = auto()
+
+################################################################################
+# Join Strategy
+################################################################################
+class JoinStrategy(Enum):
+    AUTO = auto()
+    SEARCH_FILTER = auto()
+    MAP_SEARCH_FILTER = auto()
+    CUSTOM = auto()
+    CROSS = auto()

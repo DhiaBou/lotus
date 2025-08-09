@@ -1,3 +1,4 @@
+import math
 from typing import Any
 
 import pandas as pd
@@ -6,7 +7,7 @@ from tqdm import tqdm
 import lotus
 from lotus.cache import operator_cache
 from lotus.templates import task_instructions
-from lotus.types import CascadeArgs, ReasoningStrategy, SemanticJoinOutput
+from lotus.types import CascadeArgs, ReasoningStrategy, SemanticJoinOutput, JoinStrategy
 from lotus.utils import show_safe_mode
 
 from .cascade_utils import calibrate_sem_sim_join, importance_sampling, learn_cascade_thresholds
@@ -388,6 +389,7 @@ def join_optimizer(
     cot_reasoning: list[str] | None = None,
     default: bool = True,
     strategy: ReasoningStrategy | None = None,
+    join_strategy: JoinStrategy = JoinStrategy.AUTO,
 ) -> tuple[pd.DataFrame, pd.DataFrame, int, int]:
     """
     Find most cost-effective join plan between Search-Filter and Map-Search-Filter
@@ -413,65 +415,86 @@ def join_optimizer(
         int: The number of high confidence negative results.
         int: The number of LM calls from optimizing join plan.
     """
+    sf_high_conf = sf_low_conf = msf_high_conf = msf_low_conf = pd.DataFrame()
+    sf_high_conf_neg = msf_high_conf_neg = 0
+    sf_learn_cost = msf_learn_cost = 0
+    sf_cost = msf_cost = float("inf")
 
     # Helper is currently default to similiarity join
     if lotus.settings.helper_lm is not None:
         lotus.logger.debug("Helper model is not supported yet. Default to similarity join.")
 
-    # Learn search-filter thresholds
-    sf_helper_join = run_sem_sim_join(l1, l2, col1_label, col2_label)
-    sf_t_pos, sf_t_neg, sf_learn_cost = learn_join_cascade_threshold(
-        sf_helper_join,
-        col1_label,
-        col2_label,
-        model,
-        user_instruction,
-        cascade_args,
-        examples_multimodal_data=examples_multimodal_data,
-        examples_answers=examples_answers,
-        cot_reasoning=cot_reasoning,
-        default=default,
-        strategy=strategy,
-    )
-    sf_high_conf = sf_helper_join[sf_helper_join["_scores"] >= sf_t_pos]
-    sf_high_conf_neg = len(sf_helper_join[sf_helper_join["_scores"] <= sf_t_neg])
-    sf_low_conf = sf_helper_join[(sf_helper_join["_scores"] < sf_t_pos) & (sf_helper_join["_scores"] > sf_t_neg)]
-    sf_cost = len(sf_low_conf)
+    if join_strategy == JoinStrategy.SEARCH_FILTER or join_strategy == JoinStrategy.AUTO:
+        lotus.logger.info("Join Optimizer: Search-Filter join plan selected.")
+        # Learn search-filter thresholds
+        sf_helper_join = run_sem_sim_join(l1, l2, col1_label, col2_label)
+        sf_t_pos, sf_t_neg, sf_learn_cost = learn_join_cascade_threshold(
+            sf_helper_join,
+            col1_label,
+            col2_label,
+            model,
+            user_instruction,
+            cascade_args,
+            examples_multimodal_data=examples_multimodal_data,
+            examples_answers=examples_answers,
+            cot_reasoning=cot_reasoning,
+            default=default,
+            strategy=strategy,
+        )
+        sf_high_conf = sf_helper_join[sf_helper_join["_scores"] >= sf_t_pos]
+        sf_high_conf_neg = len(sf_helper_join[sf_helper_join["_scores"] <= sf_t_neg])
+        sf_low_conf = sf_helper_join[(sf_helper_join["_scores"] < sf_t_pos) & (sf_helper_join["_scores"] > sf_t_neg)]
+        sf_cost = len(sf_low_conf)
+        if join_strategy == JoinStrategy.SEARCH_FILTER:
+            lotus.logger.info("Proceeding with Search-Filter (forced by join_strategy).")
+            sf_high_conf = sf_high_conf.sort_values(by="_scores", ascending=False)
+            sf_low_conf = sf_low_conf.sort_values(by="_scores", ascending=False)
+            learning_cost = sf_learn_cost
+            return sf_high_conf, sf_low_conf, sf_high_conf_neg, learning_cost
 
-    # Learn map-search-filter thresholds
-    mapped_l1, mapped_col1_label = map_l1_to_l2(
-        l1, col1_label, col2_label, map_instruction=map_instruction, map_examples=map_examples
-    )
-    msf_helper_join = run_sem_sim_join(mapped_l1, l2, mapped_col1_label, col2_label)
-    msf_t_pos, msf_t_neg, msf_learn_cost = learn_join_cascade_threshold(
-        msf_helper_join,
-        col1_label,
-        col2_label,
-        model,
-        user_instruction,
-        cascade_args,
-        examples_multimodal_data=examples_multimodal_data,
-        examples_answers=examples_answers,
-        cot_reasoning=cot_reasoning,
-        default=default,
-        strategy=strategy,
-    )
-    msf_high_conf = msf_helper_join[msf_helper_join["_scores"] >= msf_t_pos]
-    msf_high_conf_neg = len(msf_helper_join[msf_helper_join["_scores"] <= msf_t_neg])
-    msf_low_conf = msf_helper_join[(msf_helper_join["_scores"] < msf_t_pos) & (msf_helper_join["_scores"] > msf_t_neg)]
-    msf_cost = len(msf_low_conf)
-    msf_learn_cost += len(l1)  # cost from map l1 to l2
+    if join_strategy == JoinStrategy.MAP_SEARCH_FILTER or join_strategy == JoinStrategy.AUTO:
+        # Learn map-search-filter thresholds
+        mapped_l1, mapped_col1_label = map_l1_to_l2(
+            l1, col1_label, col2_label, map_instruction=map_instruction, map_examples=map_examples
+        )
+        msf_helper_join = run_sem_sim_join(mapped_l1, l2, mapped_col1_label, col2_label)
+        msf_t_pos, msf_t_neg, msf_learn_cost = learn_join_cascade_threshold(
+            msf_helper_join,
+            col1_label,
+            col2_label,
+            model,
+            user_instruction,
+            cascade_args,
+            examples_multimodal_data=examples_multimodal_data,
+            examples_answers=examples_answers,
+            cot_reasoning=cot_reasoning,
+            default=default,
+            strategy=strategy,
+        )
+        msf_high_conf = msf_helper_join[msf_helper_join["_scores"] >= msf_t_pos]
+        msf_high_conf_neg = len(msf_helper_join[msf_helper_join["_scores"] <= msf_t_neg])
+        msf_low_conf = msf_helper_join[(msf_helper_join["_scores"] < msf_t_pos) & (msf_helper_join["_scores"] > msf_t_neg)]
+        msf_cost = len(msf_low_conf)
+        msf_learn_cost += len(l1)  # cost from map l1 to l2
+        if join_strategy == JoinStrategy.MAP_SEARCH_FILTER:
+            lotus.logger.info("Proceeding with Map-Search-Filter (forced by join_strategy).")
+            msf_high_conf = msf_high_conf.sort_values(by="_scores", ascending=False)
+            msf_low_conf = msf_low_conf.sort_values(by="_scores", ascending=False)
+            learning_cost = msf_learn_cost
+            return msf_high_conf, msf_low_conf, msf_high_conf_neg, learning_cost
 
-    # Select the cheaper join plan
-    lotus.logger.info("Join Optimizer: plan cost analysis:")
-    lotus.logger.info(f"    Search-Filter: {sf_cost} LLM calls.")
-    lotus.logger.info(
-        f"    Search-Filter: accept {len(sf_high_conf)} helper positive results, {sf_high_conf_neg} helper negative results."
-    )
-    lotus.logger.info(f"    Map-Search-Filter: {msf_cost} LLM calls.")
-    lotus.logger.info(
-        f"    Map-Search-Filter: accept {len(msf_high_conf)} helper positive results, {msf_high_conf_neg} helper negative results."
-    )
+
+    if join_strategy == JoinStrategy.AUTO:
+        # Select the cheaper join plan
+        lotus.logger.info("Join Optimizer: plan cost analysis:")
+        lotus.logger.info(f"    Search-Filter: {sf_cost} LLM calls.")
+        lotus.logger.info(
+            f"    Search-Filter: accept {len(sf_high_conf)} helper positive results, {sf_high_conf_neg} helper negative results."
+        )
+        lotus.logger.info(f"    Map-Search-Filter: {msf_cost} LLM calls.")
+        lotus.logger.info(
+            f"    Map-Search-Filter: accept {len(msf_high_conf)} helper positive results, {msf_high_conf_neg} helper negative results."
+        )
 
     learning_cost = sf_learn_cost + msf_learn_cost
     if sf_cost < msf_cost:
@@ -590,6 +613,7 @@ class SemJoinDataframe:
         return_stats: bool = False,
         safe_mode: bool = False,
         progress_bar_desc: str = "Join comparisons",
+        join_strategy: JoinStrategy = JoinStrategy.AUTO,
     ) -> pd.DataFrame:
         """
         Applies semantic join over a dataframe.
@@ -680,6 +704,7 @@ class SemJoinDataframe:
             (cascade_args is not None)
             and (cascade_args.recall_target is not None or cascade_args.precision_target is not None)
             and (num_full_join >= cascade_args.min_join_cascade_size)
+            and (join_strategy == JoinStrategy.MAP_SEARCH_FILTER or join_strategy == JoinStrategy.AUTO or join_strategy == JoinStrategy.SEARCH_FILTER)
         ):
             cascade_args.recall_target = 1.0 if cascade_args.recall_target is None else cascade_args.recall_target
             cascade_args.precision_target = (
@@ -704,6 +729,19 @@ class SemJoinDataframe:
                 strategy=strategy,
                 safe_mode=safe_mode,
             )
+        elif join_strategy == JoinStrategy.CUSTOM:
+            lotus.logger.info("Join: CUSTOM strategy → dummy cross join (no model calls).")
+
+            if return_explanations:
+                jr = [(li, ri, "custom_cross") for li in self._obj.index for ri in other.index]
+            else:
+                jr = [(li, ri) for li in self._obj.index for ri in other.index]
+
+            # Create a lightweight object with the attributes your code reads later
+            output = type("Out", (), {})()
+            output.join_results = jr
+            output.all_raw_outputs = []
+            output.stats = None
         else:
             output = sem_join(
                 self._obj[real_left_on],
