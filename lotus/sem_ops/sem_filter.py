@@ -218,7 +218,7 @@ class SemFilterDataframe:
         safe_mode: bool = False,
         progress_bar_desc: str = "Filtering",
         additional_cot_instructions: str = "",
-        find_top_k: bool = True,
+        find_top_k: bool = False,
     ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
         """
         Applies semantic filter over a dataframe.
@@ -367,10 +367,16 @@ class SemFilterDataframe:
 
                 # TODO: How to handle multiple columns?
                 search_df = self._obj.sem_search(col_li[0], formatted_usr_instr, K=len(self._obj), return_scores=True)
-                proxy_scores = search_df["vec_scores_sim_score"].tolist()
+                sim = pd.Series(search_df["vec_scores_sim_score"].values, index=search_df.index)
+                if sim.min() < 0:
+                    sim = (sim + 1) / 2.0
+
+                # reindex to original DF order
+                sim = sim.reindex(self._obj.index).fillna(0.0)
+                proxy_scores = sim.tolist()
 
             sample_indices, correction_factors = importance_sampling(proxy_scores, cascade_args)
-            sample_df = self._obj.loc[sample_indices]
+            sample_df = self._obj.iloc[sample_indices]
             sample_multimodal_data = task_instructions.df2multimodal_info(sample_df, col_li)
             sample_proxy_scores = [proxy_scores[i] for i in sample_indices]
             sample_correction_factors = correction_factors[sample_indices]
@@ -401,8 +407,7 @@ class SemFilterDataframe:
             proxy_outputs = [False] * len(multimodal_data)
 
             # Set proxy_outputs where confidence is high
-            for idx_i in range(len(proxy_scores)):
-                true_prob = proxy_scores[idx_i]
+            for idx_i, true_prob in enumerate(proxy_scores):
                 if true_prob >= pos_cascade_threshold or true_prob <= neg_cascade_threshold:
                     high_conf_idxs.add(idx_i)
                     proxy_outputs[idx_i] = (
