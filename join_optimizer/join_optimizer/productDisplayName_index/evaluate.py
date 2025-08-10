@@ -1,29 +1,31 @@
-def evaluate_filter(merged_df, filtered_df, article_type, base_colour):
-    # Ground‑truth positives
+def evaluate_filter(merged_df, filtered_df, article_type, base_colour=None):
+    # Ground-truth positives
     true_df = merged_df[
         (merged_df['_articleType_x'] == article_type) &
-        (merged_df['_baseColour_x']   == base_colour)
+        (base_colour is None or merged_df['_baseColour_x'] == base_colour)
         ]
 
     # Counts
-    P  = filtered_df['_id'].nunique()                             # predicted positives
-    A  = true_df    ['_id'].nunique()                             # actual positives
-    TP = filtered_df[filtered_df['_id'].isin(true_df['_id'])] \
-        ['_id'].nunique()                                    # true positives
-    FP = P - TP                                                   # false positives
-    FN = A - TP                                                   # false negatives
+    P  = filtered_df['_id'].nunique()
+    A  = true_df['_id'].nunique()
+    TP_ids = filtered_df[filtered_df['_id'].isin(true_df['_id'])]['_id'].unique()
+    TP = len(TP_ids)
 
-    # Metrics (guarding against zero division)
-    precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
-    recall    = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    f1_score  = (2 * precision * recall) / (precision + recall) \
-        if (precision + recall) > 0 else 0.0
+    FP_ids = set(filtered_df['_id']) - set(TP_ids)
+    FN_ids = set(true_df['_id']) - set(TP_ids)
+
+    FP_df = filtered_df[filtered_df['_id'].isin(FP_ids)]
+    FN_df = true_df[true_df['_id'].isin(FN_ids)]
+
+    precision = TP / (TP + len(FP_ids)) if (TP + len(FP_ids)) > 0 else 0.0
+    recall    = TP / (TP + len(FN_ids)) if (TP + len(FN_ids)) > 0 else 0.0
+    f1_score  = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
 
     return {
         'TP': TP,
-        'FP': FP,
-        'FN': FN,
+        'FP': len(FP_ids),
+        'FN': len(FN_ids),
         'precision': precision,
         'recall': recall,
-        'f1': f1_score
-    }
+        'f1': f1_score,
+    }, FP_df, FN_df
