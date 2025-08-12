@@ -12,20 +12,24 @@ def importance_sampling(
     """Uses importance sampling and returns the list of indices from which to learn cascade thresholds."""
     if cascade_args.cascade_IS_random_seed is not None:
         np.random.seed(cascade_args.cascade_IS_random_seed)
-
+    # linearly map proxy scores to 0,1 range
+    proxy_scores = np.asarray(proxy_scores, dtype=np.float64)
+    proxy_scores = np.clip(proxy_scores, 1e-12, 1.0 - 1e-12)
     w = np.sqrt(proxy_scores)
     is_weight = cascade_args.cascade_IS_weight
     w = is_weight * w / np.sum(w) + (1 - is_weight) * np.ones((len(proxy_scores))) / len(proxy_scores)
 
     sample_range = min(cascade_args.cascade_IS_max_sample_range, len(proxy_scores))
-    sample_w = w[:sample_range]
+    ranked_indices = np.argsort(proxy_scores)[::-1][:sample_range]
+
+    sample_w = w[ranked_indices]
     sample_w = sample_w / np.sum(sample_w)
-    indices = np.arange(sample_range)
 
     sample_size = int(cascade_args.sampling_percentage * len(proxy_scores))
-    sample_indices = np.random.choice(indices, sample_size, p=sample_w)
+    sample_indices = np.random.choice(ranked_indices, sample_size, p=sample_w)
 
-    correction_factors = (1 / len(proxy_scores)) / w
+    correction_factors = np.zeros(len(proxy_scores), dtype=np.float64)
+    correction_factors[ranked_indices] = (1 / len(proxy_scores)) / sample_w
 
     return sample_indices, correction_factors
 
