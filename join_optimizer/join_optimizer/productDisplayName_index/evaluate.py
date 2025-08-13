@@ -1,9 +1,12 @@
-def evaluate_filter(merged_df, filtered_df, article_type, base_colour=None):
+def evaluate_filter(dataset_df, filtered_df, article_type=None, base_colour=None):
     # Ground-truth positives
-    true_df = merged_df[
-        (merged_df['_articleType_x'] == article_type) &
-        (base_colour is None or merged_df['_baseColour_x'] == base_colour)
-        ]
+    if article_type or base_colour:
+        true_df = dataset_df[
+            (article_type is None or dataset_df['_articleType_x'] == article_type) &
+            (base_colour is None or dataset_df['_baseColour_x'] == base_colour)
+            ]
+    else:
+        true_df = dataset_df
 
     # Counts
     P  = filtered_df['_id'].nunique()
