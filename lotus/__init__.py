@@ -19,6 +19,7 @@ from lotus.sem_ops import (
     sem_cluster_by,
     sem_dedup,
     sem_topk,
+    sem_captions_index,
 )
 from lotus.web_search import web_search, WebSearchCorpus
 from lotus.settings import settings  # type: ignore[attr-defined]
