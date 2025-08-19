@@ -1,5 +1,7 @@
 import lotus.models
 import lotus.vector_store
+from lotus.models.cs import CS
+from lotus.models.cm import CM
 from lotus.types import SerializationFormat
 
 # NOTE: Settings class is not thread-safe
@@ -12,6 +14,8 @@ class Settings:
     helper_lm: lotus.models.LM | None = None
     reranker: lotus.models.Reranker | None = None
     vs: lotus.vector_store.VS | None = None
+    cm: CM | None = None # Captioner model
+    cs: CS | None = None # Caption store
 
     # Cache settings
     enable_cache: bool = False

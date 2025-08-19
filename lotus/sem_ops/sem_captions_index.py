@@ -1,142 +1,142 @@
-# sem_captions_index.py
-from typing import Any, Iterable, Optional, List, Tuple
-from pathlib import Path
-from PIL import Image
+from __future__ import annotations
+from typing import Any, Sequence, Optional, List, Tuple, Dict
+
 import pandas as pd
 
 import lotus
 from lotus.cache import operator_cache
 
-# Optional: reuse your URL helpers if you caption URLs too
-import io, re, requests
-from urllib.parse import urlparse
-
-from lotus.sem_ops.coptioner.caption_store import CaptionFTSStore
-from lotus.sem_ops.coptioner.captioner import Captioner
-
-IMG_EXT_RE = re.compile(r"\.(png|jpe?g|webp|bmp|gif|tiff?)($|\?)", re.IGNORECASE)
-def looks_like_image_url(s: str) -> bool:
-    try:
-        u = urlparse(s)
-        return (u.scheme in {"http", "https"}) and bool(u.netloc)
-    except Exception:
-        return False
-def fetch_pil(url: str) -> Image.Image:
-    r = requests.get(url, timeout=15); r.raise_for_status()
-    return Image.open(io.BytesIO(r.content)).convert("RGB")
-
-# local imports
 
 @pd.api.extensions.register_dataframe_accessor("sem_captions_index")
 class SemCaptionsIndexAccessor:
-    """
-    DataFrame accessor for:
-      1) Captioning a column of images (paths or URLs)
-      2) Storing captions in an FTS5 DB
-      3) Retrieving “rows of importance” by caption query
-    Keeps parity with your sem_index style.
-    """
-    def __init__(self, pandas_obj: Any) -> None:
-        if not isinstance(pandas_obj, pd.DataFrame):
-            raise AttributeError("Must be a DataFrame")
-        self._obj = pandas_obj
-        self._obj.attrs.setdefault("cap_index_dirs", {})  # map: out_col -> db_path
+    """DataFrame accessor for caption-based indexing/search."""
 
-    # ---------- Build / index ----------
+    def __init__(self, pandas_obj: Any) -> None:
+        self._validate(pandas_obj)
+        self._obj = pandas_obj
+        self._obj.attrs.setdefault("cap_index_dirs", {})  # {col_name: index_dir}
+
+    @staticmethod
+    def _validate(obj: Any) -> None:
+        if not isinstance(obj, pd.DataFrame):
+            raise AttributeError("Must be a DataFrame")
 
     @operator_cache
-    def __call__(
-            self,
-            img_col: str,
-            out_col: str,
-            db_path: str,
-            batch_size: int = 32,
-            overwrite_db: bool = False,
-            captioner: Optional[Captioner] = None,
-    ) -> pd.DataFrame:
+    def __call__(self, col_name: str, index_dir: str, batch_size: int = 10) -> pd.DataFrame:
         """
-        Caption images in `img_col`, write captions to `out_col`, and index them into FTS store at `db_path`.
-        Supports local paths or URLs in `img_col`.
+        Index a column of image paths/URLs by generating captions and storing them in a caption store.
+
+        Args:
+            col_name: Column containing image paths/URLs.
+            index_dir: SQLite path (or store dir) used by the CaptionStore implementation.
+            batch_size: Captioning batch size.
+
+        Returns:
+            The same DataFrame with the index directory recorded in attrs.
         """
-        cap = captioner or getattr(lotus.settings, "captioner", None) or Captioner()
-        store = getattr(lotus.settings, "cap_store", None) or CaptionFTSStore(db_path)
-        if overwrite_db:
-            store.clear()
+        lotus.logger.warning(
+            "Do not reset the dataframe index to ensure proper functionality of get_captions_from_index"
+        )
 
-        paths = self._obj[img_col].tolist()
+        cap = getattr(lotus.settings, "cm", None)   # CM
+        store = getattr(lotus.settings, "cs", None) # CS
+        if cap is None or store is None:
+            raise ValueError(
+                "The retrieval model must be an instance of RM, and the vector store must be an instance of VS. "
+                "Please configure a valid retrieval model using lotus.settings.configure()"
+            )
 
-        # Batch load images
-        images, ids = [], []
-        captions: List[str] = []
+        paths: List[str] = self._obj[col_name].tolist()
+        ids: List[str] = [str(i) for i in self._obj.index.tolist()]
 
-        def flush_batch():
-            nonlocal images, captions
-            if not images:
-                return
-            captions.extend(cap(images))
-            images = []
+        captions: List[str] = cap(paths, batch_size=batch_size)  # CM: list[str], same order as paths
+        if len(captions) != len(ids):
+            raise RuntimeError("Caption count mismatch. Check input column and batching.")
 
-        for rid, it in zip(self._obj.index.astype(str).tolist(), paths):
-            if looks_like_image_url(str(it)):
-                img = fetch_pil(str(it))
-            else:
-                img = Image.open(Path(str(it))).convert("RGB")
-            images.append(img); ids.append(rid)
-            if len(images) == batch_size:
-                flush_batch()
-
-        flush_batch()
-        assert len(captions) == len(ids), "Batching bug: captions/ids mismatch"
-
-        # Persist captions into dataframe
-        self._obj[out_col] = pd.Series(captions, index=self._obj.index)
-
-        # Index into FTS (rid, caption)
-        store.index(zip(ids, captions))
-
-        # keep pointers for later retrieval
-        self._obj.attrs["cap_index_dirs"][out_col] = db_path
+        store.index(ids, captions, index_dir)  # CS.index(ids, captions, index_dir)
+        self._obj.attrs["cap_index_dirs"][col_name] = index_dir
         return self._obj
 
-    # ---------- Retrieval helpers ----------
+    def attach_index(self, col_name: str, index_dir: str) -> pd.DataFrame:
+        """Attach an existing caption index without re-captioning."""
+        self._obj.attrs.setdefault("cap_index_dirs", {})
+        self._obj.attrs["cap_index_dirs"][col_name] = index_dir
+        return self._obj
 
-    def _get_store(self, out_col: str) -> CaptionFTSStore:
-        db = self._obj.attrs["cap_index_dirs"].get(out_col)
-        if not db:
-            raise ValueError(f"No caption index found for column '{out_col}'. Did you call df.sem_captions_index(...)?")
-        return CaptionFTSStore(db)
+    def _dir_for(self, col_name: str) -> str:
+        idx = self._obj.attrs.get("cap_index_dirs", {}).get(col_name)
+        if not idx:
+            raise ValueError(
+                f"No caption index for column '{col_name}'. "
+                f"Call df.sem_captions_index('{col_name}', index_dir) first or use attach_index()."
+            )
+        return idx
 
-    def search(self, query: str, out_col: str, limit: int = 1000) -> pd.DataFrame:
+    def search(self, query: str, col_name: str, K: int = 100, ids: Optional[Sequence[Any]] = None) -> pd.DataFrame:
         """
-        Caption-only recall: returns a new DataFrame containing the top matches,
-        ordered by BM25 (best first), with a 'cap_score' column (higher is better).
+        Search captions using FTS-like query syntax, returning matching rows ordered by score.
+
+        Adds a 'cap_score' column (higher is better).
         """
-        store = self._get_store(out_col)
-        hits: List[Tuple[str, float]] = store.search(query, limit=limit)
+        store = getattr(lotus.settings, "cs", None)
+        if store is None:
+            raise ValueError(
+                "The retrieval model must be an instance of RM, and the vector store must be an instance of VS. "
+                "Please configure a valid retrieval model using lotus.settings.configure()"
+            )
+
+        index_dir = self._dir_for(col_name)
+        store.load_index(index_dir)
+
+        subset_ids_str: Optional[List[str]] = None
+        if ids is not None:
+            subset_ids_str = [str(i) for i in ids]
+
+        hits: List[Tuple[str, float]] = store(query, K, ids=subset_ids_str)  # [(rid_str, score)]
         if not hits:
             return self._obj.iloc[0:0].copy()
 
-        # map rids (stringified original index) back to the dataframe
-        idx = [type(self._obj.index.tolist()[0])(rid) if hasattr(self._obj.index, "dtype") else rid
-               for rid, _ in hits]
-        out = self._obj.loc[idx].copy()
-        # preserve hit order
-        order = {rid: i for i, (rid, _) in enumerate(hits)}
-        out["cap_score"] = [hits[order[str(i)]][1] for i in out.index.astype(str)]
-        out = out.sort_values("cap_score", ascending=False)
+        # Map string rids back to original index labels
+        str2label: Dict[str, Any] = {str(i): i for i in self._obj.index.tolist()}
+        labels: List[Any] = [str2label[rid] for rid, _ in hits if rid in str2label]
+        scores: List[float] = [score for rid, score in hits if rid in str2label]
+
+        out = self._obj.loc[labels].copy()
+        out["cap_score"] = scores
+        # already in hit order; no need to sort unless you want to be explicit:
+        # out = out.sort_values("cap_score", ascending=False)
         return out
 
-    def retrieve_rows(self, predicate_text: str, out_col: str, limit: int = 1000,
-                      must: Iterable[str] = (), must_not: Iterable[str] = ()) -> pd.DataFrame:
+    def load(self, col_name: str, out_col: Optional[str] = None, ids: Optional[Sequence[Any]] = None,
+             default: str = "") -> pd.DataFrame:
         """
-        Convenience: caption recall + cheap lexical gates.
-        Use FTS MATCH syntax in `predicate_text` or pass plain words.
+        Hydrate captions from the store into a DataFrame column.
+
+        Args:
+            col_name: The column that was indexed (used to locate the index_dir).
+            out_col: Destination column to write captions into (defaults to f"{col_name}_cap").
+            ids: Optional subset of DataFrame index labels to hydrate. Defaults to all rows.
+            default: Value to use when a caption is missing.
+
+        Returns:
+            The DataFrame with captions written to out_col.
         """
-        df = self.search(predicate_text, out_col=out_col, limit=limit).copy()
-        if df.empty:
-            return df
-        if must:
-            df = df[df[out_col].str.lower().apply(lambda t: all(w.lower() in t for w in must))]
-        if must_not:
-            df = df[df[out_col].str.lower().apply(lambda t: all(w.lower() not in t for w in must_not))]
-        return df
+        store =getattr(lotus.settings, "cs", None) # CS
+
+        if store is None:
+            raise ValueError(
+                "The retrieval model must be an instance of RM, and the vector store must be an instance of VS. "
+                "Please configure a valid retrieval model using lotus.settings.configure()"
+            )
+
+        index_dir = self._dir_for(col_name)
+        out_col = out_col or f"{col_name}_cap"
+
+        if ids is None:
+            ids = list(self._obj.index)
+        id_strs = [str(i) for i in ids]
+
+        got = store.get_captions_from_index(index_dir, id_strs)  # {rid_str: caption}
+        series = [got.get(str(i), default) for i in self._obj.index.tolist()]
+        self._obj[out_col] = pd.Series(series, index=self._obj.index)
+        return self._obj
