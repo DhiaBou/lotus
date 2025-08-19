@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Sequence, Optional, List, Tuple, Dict
+
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -38,8 +39,8 @@ class SemCaptionsIndexAccessor:
             "Do not reset the dataframe index to ensure proper functionality of get_captions_from_index"
         )
 
-        cap = getattr(lotus.settings, "cm", None)   # CM
-        store = getattr(lotus.settings, "cs", None) # CS
+        cap = getattr(lotus.settings, "cm", None)  # CM
+        store = getattr(lotus.settings, "cs", None)  # CS
         if cap is None or store is None:
             raise ValueError(
                 "The retrieval model must be an instance of RM, and the vector store must be an instance of VS. "
@@ -107,8 +108,9 @@ class SemCaptionsIndexAccessor:
         # out = out.sort_values("cap_score", ascending=False)
         return out
 
-    def load(self, col_name: str, out_col: Optional[str] = None, ids: Optional[Sequence[Any]] = None,
-             default: str = "") -> pd.DataFrame:
+    def load(
+        self, col_name: str, out_col: Optional[str] = None, ids: Optional[Sequence[Any]] = None, default: str = ""
+    ) -> pd.DataFrame:
         """
         Hydrate captions from the store into a DataFrame column.
 
@@ -121,7 +123,7 @@ class SemCaptionsIndexAccessor:
         Returns:
             The DataFrame with captions written to out_col.
         """
-        store =getattr(lotus.settings, "cs", None) # CS
+        store = getattr(lotus.settings, "cs", None)  # CS
 
         if store is None:
             raise ValueError(

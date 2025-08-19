@@ -17,7 +17,7 @@ class BlipCaptioner(CM):
     device: str = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
 
     def __post_init__(self):
-        torch.set_num_threads(max(1, (os.cpu_count() or 4) // 2))
+        torch.set_num_threads(max(1, (os.cpu_count() or 4)))
         self.processor = BlipProcessor.from_pretrained(self.model_name)
         self.model = BlipForConditionalGeneration.from_pretrained(self.model_name).to(self.device)
         self.model.eval()

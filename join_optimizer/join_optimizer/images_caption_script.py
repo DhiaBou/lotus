@@ -5,8 +5,7 @@ import pandas as pd
 
 from lotus.dtype_extensions import ImageArray
 from lotus.models.blip_cm import BlipCaptioner
-from lotus.models.db_fts_store import SQLiteFTSStore
-from lotus.models.instructblip_cm import InstructBlipCaptioner
+from lotus.fts_store.db_fts_store import SQLiteFTSStore
 
 parquet_path_sampeled = "fashion_product_images/styles.parquet"
 parquet_path = "fashion_product_images/styles.parquet"
@@ -56,9 +55,9 @@ gpt_4o = LM("gpt-4o-mini")
 db_path = "caps_blip.db"
 lotus.settings.configure(lm=gpt_4o, helper_lm=gpt_4o_mini, cm=BlipCaptioner(), cs=SQLiteFTSStore())
 
-merged_df = merged_df.sem_captions_index("_image", index_dir=db_path)
-# merged_df = merged_df.sem_captions_index.attach_index("_image", index_dir=db_path)
-# merged_df = merged_df.sem_captions_index.load("_image")
-# merged_df = merged_df.sem_captions_index.search("white shirt", "_image", K=10)
+# merged_df = merged_df.sem_captions_index("_image", index_dir=db_path)
+merged_df = merged_df.sem_captions_index.attach_index("_image", index_dir=db_path)
+merged_df = merged_df.sem_captions_index.load("_image")
+merged_df = merged_df.sem_captions_index.search("white man shirt", "_image", K=120)
 
 print(merged_df)

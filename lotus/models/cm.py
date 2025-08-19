@@ -18,7 +18,7 @@ class CM(ABC):
 
     @abstractmethod
     def _caption_images(self, images: Sequence[Image.Image]) -> List[str]:
-        """Return captions for the given PIL images (same order)."""
+        """Return captions for the given images (same order)."""
         pass
 
     def __call__(self, paths: Sequence[str], batch_size: int = 16) -> List[str]:
@@ -33,7 +33,7 @@ class CM(ABC):
 
         def _load_image(src: str) -> Image.Image:
             if _is_url(src):
-                r = requests.get(src, timeout=15);
+                r = requests.get(src, timeout=15)
                 r.raise_for_status()
                 return Image.open(io.BytesIO(r.content)).convert("RGB")
             if not _IMG_EXT_RE.search(src):

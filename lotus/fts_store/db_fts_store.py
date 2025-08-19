@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from lotus.models.cs import CS
+from lotus.fts_store.cs import CS
 
 
 class SQLiteFTSStore(CS):
