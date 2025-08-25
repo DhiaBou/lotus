@@ -28,5 +28,14 @@ class BlipCaptioner(CM):
             return []
         inputs = self.processor(images=list(images), return_tensors="pt", padding=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        out = self.model.generate(**inputs, do_sample=False, early_stopping=True)
+        out = self.model.generate(**inputs, 
+                                  do_sample=False, 
+                                  early_stopping=False,
+                                  length_penalty=0.9,
+                                    num_beams=3,
+                                    no_repeat_ngram_size=3,
+                                    repetition_penalty=1.07,
+                                    max_new_tokens=70,
+                                    renormalize_logits=True,
+                                  )
         return self.processor.batch_decode(out, skip_special_tokens=True)
