@@ -219,6 +219,7 @@ class SemFilterDataframe:
         progress_bar_desc: str = "Filtering",
         additional_cot_instructions: str = "",
         find_top_k: bool = False,
+        col_li: list[str] | None = None,
     ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
         """
         Applies semantic filter over a dataframe.
@@ -249,7 +250,7 @@ class SemFilterDataframe:
 
         stats: dict[str, float] = {}
         lotus.logger.debug(user_instruction)
-        col_li = lotus.nl_expression.parse_cols(user_instruction)
+        col_li = col_li if col_li else lotus.nl_expression.parse_cols(user_instruction)
         lotus.logger.debug(col_li)
         helper_strategy = strategy
 

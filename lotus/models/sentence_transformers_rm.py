@@ -3,7 +3,7 @@ import re
 import requests
 from urllib.parse import urlparse
 from typing import List, Tuple
-
+import os
 import numpy as np
 import torch
 from numpy.typing import NDArray
@@ -15,6 +15,9 @@ from lotus.dtype_extensions import convert_to_base_data
 from lotus.models.rm import RM
 
 IMG_EXT_RE = re.compile(r"\.(png|jpe?g|webp|bmp|gif|tiff?)($|\?)", re.IGNORECASE)
+
+def looks_like_image_path(s: str) -> bool:
+    return os.path.isfile(s) and IMG_EXT_RE.search(s) is not None
 
 def looks_like_image_url(s: str) -> bool:
     try:
@@ -30,6 +33,8 @@ def fetch_pil(url: str) -> Image.Image:
     r.raise_for_status()
     return Image.open(io.BytesIO(r.content)).convert("RGB")
 
+def fetch_pil_path(path: str) -> Image.Image:
+    return Image.open(path).convert("RGB")
 
 class SentenceTransformersRM(RM):
     def __init__(
@@ -37,11 +42,11 @@ class SentenceTransformersRM(RM):
         model: str = "clip-ViT-L-14",   # multimodal-capable model
         max_batch_size: int = 64,
         normalize_embeddings: bool = True,
-        device: str | None = None,
     ):
         self.model_name: str = model
         self.max_batch_size: int = max_batch_size
         self.normalize: bool = normalize_embeddings
+        device: str = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
 
         self.model: SentenceTransformer = SentenceTransformer(model, device=device)
 
@@ -84,6 +89,9 @@ class SentenceTransformersRM(RM):
         for idx, d in enumerate(docs):
             if looks_like_image_url(d):
                 img = fetch_pil(d)
+                image_items.append((idx, img))
+            elif looks_like_image_path(d):
+                img = fetch_pil_path(d)
                 image_items.append((idx, img))
             else:
                 text_items.append((idx, d))
