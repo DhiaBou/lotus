@@ -1,3 +1,4 @@
+import gc
 import io
 import re
 import requests
@@ -82,45 +83,61 @@ class SentenceTransformersRM(RM):
     # ---- public API ----
 
     def _embed(self, docs: List[str]) -> NDArray[np.float32]:
-        text_items: List[Tuple[int, str]] = []
-        image_items: List[Tuple[int, Image.Image]] = []
+        image_indices: List[Tuple[int, str]] = []
+        text_indices: List[int] = []
 
-        # split / fetch
         for idx, d in enumerate(docs):
             if looks_like_image_url(d):
-                img = fetch_pil(d)
-                image_items.append((idx, img))
+                image_indices.append((idx, "url"))
             elif looks_like_image_path(d):
-                img = fetch_pil_path(d)
-                image_items.append((idx, img))
+                image_indices.append((idx, "path"))
             else:
-                text_items.append((idx, d))
+                text_indices.append(idx)
 
         vecs: List[np.ndarray | None] = [None] * len(docs)
 
-        # images
-        for i in range(0, len(image_items), self.max_batch_size):
-            chunk = image_items[i : i + self.max_batch_size]
-            if not chunk:
-                continue
-            ids, imgs = zip(*chunk)
-            emb = self._encode_image_batch(list(imgs))
+        for i in range(0, len(image_indices), self.max_batch_size):
+            chunk = image_indices[i : i + self.max_batch_size]
+            ids: List[int] = []
+            imgs: List[Image.Image] = []
+            for j, kind in chunk:
+                src = docs[j]
+                try:
+                    img = fetch_pil(src) if kind == "url" else fetch_pil_path(src)
+                    imgs.append(img)
+                    ids.append(j)
+                except Exception:
+                    continue
+            if imgs:
+                emb = self._encode_image_batch(imgs)
+                for j, v in zip(ids, emb):
+                    vecs[j] = v
+                for im in imgs:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+                del imgs
+                gc.collect()
+
+        for i in range(0, len(text_indices), self.max_batch_size):
+            ids = text_indices[i : i + self.max_batch_size]
+            txts = [docs[j] for j in ids]
+            emb = self._encode_text_batch(txts)
             for j, v in zip(ids, emb):
                 vecs[j] = v
 
-        # text
-        for i in range(0, len(text_items), self.max_batch_size):
-            chunk = text_items[i : i + self.max_batch_size]
-            if not chunk:
-                continue
-            ids, txts = zip(*chunk)
-            emb = self._encode_text_batch(list(txts))
-            for j, v in zip(ids, emb):
-                vecs[j] = v
-
-        # sanity check
-        if any(v is None for v in vecs):
-            missing = [i for i, v in enumerate(vecs) if v is None]
+        missing = [i for i, v in enumerate(vecs) if v is None]
+        if missing:
             raise ValueError(f"Some documents failed to embed: indices {missing}")
 
-        return np.vstack(vecs)  # float32 by default from ST
+        out = np.vstack(vecs)
+        if out.dtype != np.float32:
+            out = out.astype(np.float32, copy=False)
+        return out
+
+
+
+
+
+
