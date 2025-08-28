@@ -15,7 +15,15 @@ class SQLiteFTSStore(CS):
         con = sqlite3.connect(self.index_dir)
         try:
             con.execute("PRAGMA journal_mode=WAL;")
-            con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS caps USING fts5(rid UNINDEXED, caption);")
+            # Use unicode61 tokenizer with options: remove diacritics, lowercase
+            con.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS caps 
+                USING fts5(
+                    rid UNINDEXED, 
+                    caption, 
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+            """)
             con.commit()
         finally:
             con.close()
