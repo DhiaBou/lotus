@@ -87,6 +87,10 @@ def fetch_image(image, image_type: str = "Image"):
                 buffered = BytesIO()
                 img.convert("RGB").save(buffered, format="PNG")
                 return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode("utf-8")
+    elif isinstance(image, Image.Image):
+        buffered = BytesIO()
+        image.convert("RGB").save(buffered, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     return image
 

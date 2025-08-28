@@ -5,12 +5,12 @@ import pandas as pd
 from PIL import Image
 
 import lotus
+from lotus.dtype_extensions import ImageArray
+from lotus.models.cm import CM
 from lotus.sem_ops.postprocessors import map_postprocess
 from lotus.sem_ops.sem_map import sem_map
-from lotus.types import ReasoningStrategy
 from lotus.templates import task_instructions
-
-from lotus.models.cm import CM
+from lotus.types import ReasoningStrategy
 
 
 @dataclass
@@ -28,27 +28,17 @@ class LLMCaptioner(CM):
     safe_mode: bool = False
     progress_bar_desc: str = "Captioning"
 
-    def __post_init__(self):
-        # Default to the globally configured LM if one wasn’t provided.
-        if self.model is None:
-            if lotus.settings.lm is None:
-                raise ValueError(
-                    "No model provided. Either pass `model=` or call lotus.settings.configure(...) first."
-                )
-            self.model = lotus.settings.lm
-
     def _caption_images(self, images: Sequence[Image.Image]) -> List[str]:
         if not images:
             return []
 
-        df = pd.DataFrame({"image": list(images)})
+        df = pd.DataFrame({"image": ImageArray(images)})
 
         multimodal_data = task_instructions.df2multimodal_info(df, ["image"])
 
-
         output = sem_map(
             docs=multimodal_data,
-            model=self.model,
+            model=lotus.settings.lm,
             user_instruction=self.user_instruction,
             postprocessor=self.postprocessor,
             strategy=self.strategy,
