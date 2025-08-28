@@ -8,6 +8,7 @@ __pycache__/
 
 dist/
 docs/_build
+datasets_semantic_ops/
 .ruff_cache
 .mypy_cache
 .pytest_cache

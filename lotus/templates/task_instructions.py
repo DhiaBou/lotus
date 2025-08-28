@@ -336,7 +336,7 @@ def df2multimodal_info(df: pd.DataFrame, cols: list[str]) -> list[dict[str, Any]
     multimodal_data = [
         {
             "text": text_rows[i],
-            "image": {col.capitalize(): df[col].array[i] for col in image_cols},
+            "image": {col.capitalize(): df[col].array.get_image(i, "base64") for col in image_cols},
         }
         for i in range(len(df))
     ]

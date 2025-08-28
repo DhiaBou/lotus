@@ -36,7 +36,7 @@ class LM:
         model: str = "gpt-4o-mini",
         temperature: float = 0.0,
         max_ctx_len: int = 128000,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         max_batch_size: int = 64,
         rate_limit: int | None = None,
         tokenizer: Tokenizer | None = None,
