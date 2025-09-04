@@ -1,10 +1,11 @@
 import base64
-import os
 import time
 from io import BytesIO
+from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
-import numpy as np
 import pandas as pd
 import requests  # type: ignore
 from PIL import Image
@@ -72,25 +73,37 @@ def cluster(col_name: str, ncentroids: int) -> Callable[[pd.DataFrame, int, bool
 
     return ret
 
+
+def _path_from_str(s: str) -> Path:
+    if s.startswith("file://"):
+        parsed = urlparse(s)
+        return Path(url2pathname(parsed.path))
+    return Path(s)
+
 def fetch_image(image, image_type: str = "Image"):
     """
-    If `image` is a local file path (including 'file://' form), return it as a base64 data URL (PNG).
-    Otherwise, return `image` unchanged.
+    If `image` is a local file path (including 'file://'), return it as a base64 JPEG data URL
+    without re-encoding. If `image` is a PIL.Image.Image, encode it as JPEG. Otherwise, return `image`.
     """
     if image is None:
         return None
 
     if isinstance(image, str):
-        path = image[7:] if image.startswith("file://") else image
-        if os.path.isfile(path):
-            with Image.open(path) as img:
-                buffered = BytesIO()
-                img.convert("RGB").save(buffered, format="PNG")
-                return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode("utf-8")
-    elif isinstance(image, Image.Image):
-        buffered = BytesIO()
-        image.convert("RGB").save(buffered, format="PNG")
-        return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode("utf-8")
+        p = _path_from_str(image)
+        if p.is_file():
+            data = p.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            return "data:image/jpeg;base64," + b64
+        return image
+
+    if Image and isinstance(image, Image.Image):
+        buf = BytesIO()
+        img = image
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=90, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return "data:image/jpeg;base64," + b64
 
     return image
 
