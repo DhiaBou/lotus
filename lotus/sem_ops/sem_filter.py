@@ -15,7 +15,7 @@ from lotus.types import (
     LogprobsForFilterCascade,
     ProxyModel,
     ReasoningStrategy,
-    SemanticFilterOutput,
+    SemanticFilterOutput, BayesStoppingArgs,
 )
 from lotus.utils import show_safe_mode
 from .cascade_utils import calibrate_llm_logprobs, importance_sampling, learn_cascade_thresholds
@@ -166,17 +166,7 @@ def scan_with_bayesian_stopping(
         docs: List[Dict[str, Any]],
         model: Any,
         user_instruction: str,
-        *,
-        block_size: int = 20,
-        min_depth: int = 20,
-        max_depth: Optional[int] = None,
-        delta: float = 0.90,
-        discount: float = 0.6,
-        alpha0: float = 1.0,
-        beta0: float = 1.0,
-        verifier_recall: float = 1.0,
-        default: bool = True,
-        verbose: bool = True,
+        bayes_stopping_args: BayesStoppingArgs,
         **sem_filter_kwargs,
 ) -> BayesScanResult:
     """
@@ -184,12 +174,12 @@ def scan_with_bayesian_stopping(
     """
     n = len(docs)
 
-    if verbose:
+    if bayes_stopping_args.verbose:
         print("[scan] Starting scan_with_bayesian_stopping (no bins)")
-        print(f"[scan] n_docs={n}, block_size={block_size}, min_depth={min_depth}, max_depth={max_depth}")
-        print(f"[scan] delta={delta} (continue while P(next block ≥1 positive) ≥ delta)")
-        print(f"[scan] discount={discount}, alpha0={alpha0}, beta0={beta0}")
-        print(f"[scan] verifier_recall={verifier_recall}, default={default}")
+        print(f"[scan] n_docs={n}, block_size={bayes_stopping_args.block_size}, min_depth={bayes_stopping_args.min_depth}, max_depth={bayes_stopping_args.max_depth}")
+        print(f"[scan] delta={bayes_stopping_args.delta} (continue while P(next block ≥1 positive) ≥ delta)")
+        print(f"[scan] discount={bayes_stopping_args.discount}, alpha0={bayes_stopping_args.alpha0}, beta0={bayes_stopping_args.beta0}")
+        print(f"[scan] verifier_recall={bayes_stopping_args.verifier_recall}, default={bayes_stopping_args.default}")
 
     if n == 0:
         return BayesScanResult(
@@ -198,7 +188,7 @@ def scan_with_bayesian_stopping(
             positive_docs=[],
             negative_indices=[],
             p_any_next_block=0.0,
-            settings=dict(block_size=block_size, delta=delta, discount=discount),
+            settings=dict(block_size=bayes_stopping_args.block_size, delta=bayes_stopping_args.delta, discount=bayes_stopping_args.discount),
         )
 
     # Single global discounted pseudo-counts
@@ -212,29 +202,29 @@ def scan_with_bayesian_stopping(
     last_p_any = 1.0
 
     while i < n:
-        j = min(n, i + block_size)
+        j = min(n, i + bayes_stopping_args.block_size)
         block = docs[i:j]
 
-        if verbose:
+        if bayes_stopping_args.verbose:
             print("\n[scan] ── Processing block ─────────────────────────────────────────")
             print(f"[scan] Block indices: [{i}:{j}) (size={j - i})")
             print("[scan] Calling sem_filter(...) on this block")
 
         # Run the verifier / semantic filter
-        res = sem_filter(block, model, user_instruction, default=default, **sem_filter_kwargs)
+        res = sem_filter(block, model, user_instruction, default=bayes_stopping_args.default, **sem_filter_kwargs)
         outputs = getattr(res, "outputs", res)
 
         # Discount prior evidence
-        if verbose:
-            print(f"[scan] Discounting prior evidence by factor {discount}")
+        if bayes_stopping_args.verbose:
+            print(f"[scan] Discounting prior evidence by factor {bayes_stopping_args.discount}")
             print(f"[scan] Before discount | succ={succ:.3f} fail={fail:.3f}")
-        succ *= discount
-        fail *= discount
-        if verbose:
+        succ *= bayes_stopping_args.discount
+        fail *= bayes_stopping_args.discount
+        if bayes_stopping_args.verbose:
             print(f"[scan] After  discount | succ={succ:.3f} fail={fail:.3f}")
 
         # Update with this block's outcomes
-        rv = max(1e-9, float(verifier_recall))
+        rv = max(1e-9, float(bayes_stopping_args.verifier_recall))
         pos_c = neg_c = 0
         for local_idx, out in enumerate(outputs):
             global_idx = i + local_idx
@@ -246,7 +236,7 @@ def scan_with_bayesian_stopping(
                 fail += 1.0
                 neg_idx.append(global_idx)
                 neg_c += 1
-        if verbose:
+        if bayes_stopping_args.verbose:
             print(f"[scan] sem_filter tallies in this block: pos={pos_c}, neg={neg_c}")
             print(f"[scan] Updated posteriors    | succ={succ:.3f} fail={fail:.3f}")
 
@@ -255,41 +245,41 @@ def scan_with_bayesian_stopping(
         # End or depth constraints
         if i >= n:
             last_p_any = 0.0
-            if verbose:
+            if bayes_stopping_args.verbose:
                 print("[scan] Reached the end of the list. No next block to look ahead to.")
             break
 
-        if i < min_depth:
-            if verbose:
-                print(f"[scan] min_depth not yet reached (i={i} < {min_depth}); continue regardless of look-ahead.")
+        if i < bayes_stopping_args.min_depth:
+            if bayes_stopping_args.verbose:
+                print(f"[scan] min_depth not yet reached (i={i} < {bayes_stopping_args.min_depth}); continue regardless of look-ahead.")
             continue
 
-        if max_depth is not None and i >= max_depth:
+        if bayes_stopping_args.max_depth is not None and i >= bayes_stopping_args.max_depth:
             last_p_any = 0.0
-            if verbose:
-                print(f"[scan] max_depth reached (i={i} ≥ {max_depth}); stopping now.")
+            if bayes_stopping_args.verbose:
+                print(f"[scan] max_depth reached (i={i} ≥ {bayes_stopping_args.max_depth}); stopping now.")
             break
 
         # Look-ahead: compute P(any positive in the next block)
-        next_j = min(n, i + block_size)
+        next_j = min(n, i + bayes_stopping_args.block_size)
         m_next = next_j - i
-        a = alpha0 + succ
-        b = beta0 + fail
+        a = bayes_stopping_args.alpha0 + succ
+        b = bayes_stopping_args.beta0 + fail
         p0 = _p_zero_next_block(m_next, a, b)
         last_p_any = 1.0 - p0
 
-        if verbose:
+        if bayes_stopping_args.verbose:
             print(f"[scan] Look-ahead next block indices: [{i}:{next_j}) (size={m_next})")
             print(f"[scan] Posterior alpha={a:.3f}, beta={b:.3f}, P(next block ≥1 pos) = {last_p_any:.6f}")
-            if last_p_any < delta:
-                print(f"[scan] Stopping: {last_p_any:.6f} < delta={delta}")
+            if last_p_any < bayes_stopping_args.delta:
+                print(f"[scan] Stopping: {last_p_any:.6f} < delta={bayes_stopping_args.delta}")
             else:
-                print(f"[scan] Continuing: {last_p_any:.6f} ≥ delta={delta}")
+                print(f"[scan] Continuing: {last_p_any:.6f} ≥ delta={bayes_stopping_args.delta}")
 
-        if last_p_any < delta:
+        if last_p_any < bayes_stopping_args.delta:
             break
 
-    if verbose:
+    if bayes_stopping_args.verbose:
         print("\n[scan] ── Final summary ───────────────────────────────────────────")
         print(f"[scan] Scanned stop_index={i} docs out of n={n}")
         print(f"[scan] Positives found: {len(pos_idx)} | Negatives (scanned prefix): {len(neg_idx)}")
@@ -302,9 +292,9 @@ def scan_with_bayesian_stopping(
         negative_indices=neg_idx,
         p_any_next_block=last_p_any,
         settings=dict(
-            block_size=block_size, min_depth=min_depth, max_depth=max_depth,
-            delta=delta, discount=discount,
-            alpha0=alpha0, beta0=beta0, verifier_recall=verifier_recall,
+            block_size=bayes_stopping_args.block_size, min_depth=bayes_stopping_args.min_depth, max_depth=bayes_stopping_args.max_depth,
+            delta=bayes_stopping_args.delta, discount=bayes_stopping_args.discount,
+            alpha0=bayes_stopping_args.alpha0, beta0=bayes_stopping_args.beta0, verifier_recall=bayes_stopping_args.verifier_recall,
         ),
     )
 
@@ -383,6 +373,7 @@ class SemFilterDataframe:
         helper_examples: pd.DataFrame | None = None,
         strategy: ReasoningStrategy | None = None,
         cascade_args: CascadeArgs | None = None,
+        bayes_stopping_args: BayesStoppingArgs | None = None,
         return_stats: bool = False,
         safe_mode: bool = False,
         progress_bar_desc: str = "Filtering",
@@ -469,14 +460,7 @@ class SemFilterDataframe:
                 ranked_multimodal,
                 lotus.settings.lm,
                 formatted_usr_instr,
-                default=default,
-                examples_multimodal_data=examples_multimodal_data,
-                examples_answers=examples_answers,
-                cot_reasoning=cot_reasoning,
-                strategy=strategy,
-                safe_mode=safe_mode,
-                progress_bar_desc="Running Bayesian scan",
-                additional_cot_instructions=additional_cot_instructions,
+                bayes_stopping_args,
             )
             lotus.logger.info(f"Bayesian scan stopped after {scan_result.stop_index} of {len(self._obj)} items")
             lotus.logger.info(f"Found {len(scan_result.positive_indices)} positives")
