@@ -1,4 +1,6 @@
-from typing import Any
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -16,7 +18,6 @@ from lotus.types import (
     SemanticFilterOutput,
 )
 from lotus.utils import show_safe_mode
-
 from .cascade_utils import calibrate_llm_logprobs, importance_sampling, learn_cascade_thresholds
 from .postprocessors import filter_postprocess
 
@@ -138,6 +139,174 @@ def find_cutoff_index(
     # lo == hi is the first index where sem_filter is False
     return lo
 
+def _log_beta(a: float, b: float) -> float:
+    return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+
+def _p_zero_next_block(m: int, alpha: float, beta: float) -> float:
+    """
+    Beta-binomial predictive: P[X=0 | alpha,beta, m]
+      = E[(1-θ)^m] with θ ~ Beta(alpha, beta) = B(alpha, beta + m) / B(alpha, beta)
+    """
+    if m <= 0:
+        return 1.0
+    # Clamp via exp(log B(...) - log B(...)) for stability
+    p0 = math.exp(_log_beta(alpha, beta + m) - _log_beta(alpha, beta))
+    return min(max(p0, 1e-300), 1.0)
+
+@dataclass
+class BayesScanResult:
+    stop_index: int  # how many docs were actually scanned
+    positive_indices: List[int]
+    positive_docs: List[Dict[str, Any]]
+    negative_indices: List[int]  # among scanned prefix
+    p_any_next_block: float  # probability (at stop) next block has ≥1 positive
+    settings: Dict[str, Any]
+
+def scan_with_bayesian_stopping(
+        docs: List[Dict[str, Any]],
+        model: Any,
+        user_instruction: str,
+        *,
+        block_size: int = 20,
+        min_depth: int = 20,
+        max_depth: Optional[int] = None,
+        delta: float = 0.90,
+        discount: float = 0.6,
+        alpha0: float = 1.0,
+        beta0: float = 1.0,
+        verifier_recall: float = 1.0,
+        default: bool = True,
+        verbose: bool = True,
+        **sem_filter_kwargs,
+) -> BayesScanResult:
+    """
+    Blockwise Bayesian stopping with a single rolling (discounted) Beta posterior.
+    """
+    n = len(docs)
+
+    if verbose:
+        print("[scan] Starting scan_with_bayesian_stopping (no bins)")
+        print(f"[scan] n_docs={n}, block_size={block_size}, min_depth={min_depth}, max_depth={max_depth}")
+        print(f"[scan] delta={delta} (continue while P(next block ≥1 positive) ≥ delta)")
+        print(f"[scan] discount={discount}, alpha0={alpha0}, beta0={beta0}")
+        print(f"[scan] verifier_recall={verifier_recall}, default={default}")
+
+    if n == 0:
+        return BayesScanResult(
+            stop_index=0,
+            positive_indices=[],
+            positive_docs=[],
+            negative_indices=[],
+            p_any_next_block=0.0,
+            settings=dict(block_size=block_size, delta=delta, discount=discount),
+        )
+
+    # Single global discounted pseudo-counts
+    succ = 0.0
+    fail = 0.0
+
+    pos_idx: List[int] = []
+    neg_idx: List[int] = []
+
+    i = 0
+    last_p_any = 1.0
+
+    while i < n:
+        j = min(n, i + block_size)
+        block = docs[i:j]
+
+        if verbose:
+            print("\n[scan] ── Processing block ─────────────────────────────────────────")
+            print(f"[scan] Block indices: [{i}:{j}) (size={j - i})")
+            print("[scan] Calling sem_filter(...) on this block")
+
+        # Run the verifier / semantic filter
+        res = sem_filter(block, model, user_instruction, default=default, **sem_filter_kwargs)
+        outputs = getattr(res, "outputs", res)
+
+        # Discount prior evidence
+        if verbose:
+            print(f"[scan] Discounting prior evidence by factor {discount}")
+            print(f"[scan] Before discount | succ={succ:.3f} fail={fail:.3f}")
+        succ *= discount
+        fail *= discount
+        if verbose:
+            print(f"[scan] After  discount | succ={succ:.3f} fail={fail:.3f}")
+
+        # Update with this block's outcomes
+        rv = max(1e-9, float(verifier_recall))
+        pos_c = neg_c = 0
+        for local_idx, out in enumerate(outputs):
+            global_idx = i + local_idx
+            if out:
+                succ += 1.0 / rv     # inflate successes to correct for imperfect recall
+                pos_idx.append(global_idx)
+                pos_c += 1
+            else:
+                fail += 1.0
+                neg_idx.append(global_idx)
+                neg_c += 1
+        if verbose:
+            print(f"[scan] sem_filter tallies in this block: pos={pos_c}, neg={neg_c}")
+            print(f"[scan] Updated posteriors    | succ={succ:.3f} fail={fail:.3f}")
+
+        i = j  # advance to the next block start
+
+        # End or depth constraints
+        if i >= n:
+            last_p_any = 0.0
+            if verbose:
+                print("[scan] Reached the end of the list. No next block to look ahead to.")
+            break
+
+        if i < min_depth:
+            if verbose:
+                print(f"[scan] min_depth not yet reached (i={i} < {min_depth}); continue regardless of look-ahead.")
+            continue
+
+        if max_depth is not None and i >= max_depth:
+            last_p_any = 0.0
+            if verbose:
+                print(f"[scan] max_depth reached (i={i} ≥ {max_depth}); stopping now.")
+            break
+
+        # Look-ahead: compute P(any positive in the next block)
+        next_j = min(n, i + block_size)
+        m_next = next_j - i
+        a = alpha0 + succ
+        b = beta0 + fail
+        p0 = _p_zero_next_block(m_next, a, b)
+        last_p_any = 1.0 - p0
+
+        if verbose:
+            print(f"[scan] Look-ahead next block indices: [{i}:{next_j}) (size={m_next})")
+            print(f"[scan] Posterior alpha={a:.3f}, beta={b:.3f}, P(next block ≥1 pos) = {last_p_any:.6f}")
+            if last_p_any < delta:
+                print(f"[scan] Stopping: {last_p_any:.6f} < delta={delta}")
+            else:
+                print(f"[scan] Continuing: {last_p_any:.6f} ≥ delta={delta}")
+
+        if last_p_any < delta:
+            break
+
+    if verbose:
+        print("\n[scan] ── Final summary ───────────────────────────────────────────")
+        print(f"[scan] Scanned stop_index={i} docs out of n={n}")
+        print(f"[scan] Positives found: {len(pos_idx)} | Negatives (scanned prefix): {len(neg_idx)}")
+        print(f"[scan] P(any positive in next block) at stop: {last_p_any:.6f}")
+
+    return BayesScanResult(
+        stop_index=i,
+        positive_indices=pos_idx,
+        positive_docs=[docs[k] for k in pos_idx],
+        negative_indices=neg_idx,
+        p_any_next_block=last_p_any,
+        settings=dict(
+            block_size=block_size, min_depth=min_depth, max_depth=max_depth,
+            delta=delta, discount=discount,
+            alpha0=alpha0, beta0=beta0, verifier_recall=verifier_recall,
+        ),
+    )
 
 def learn_filter_cascade_thresholds(
     sample_multimodal_data: list[dict[str, Any]],
@@ -220,6 +389,7 @@ class SemFilterDataframe:
         additional_cot_instructions: str = "",
         find_top_k: bool = False,
         col_li: list[str] | None = None,
+        bayesian_scan: bool = False,
     ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
         """
         Applies semantic filter over a dataframe.
@@ -286,6 +456,41 @@ class SemFilterDataframe:
                 helper_examples_answers = helper_examples["Answer"].tolist()
                 if helper_strategy == ReasoningStrategy.COT and "Reasoning" in helper_examples.columns:
                     helper_cot_reasoning = helper_examples["Reasoning"].tolist()
+        if bayesian_scan:
+            search_df = self._obj.sem_search(
+                col_li[0],
+                formatted_usr_instr,
+                K=len(self._obj),
+                return_scores=True,
+            )
+            ranked_multimodal = task_instructions.df2multimodal_info(search_df, col_li)
+
+            scan_result = scan_with_bayesian_stopping(
+                ranked_multimodal,
+                lotus.settings.lm,
+                formatted_usr_instr,
+                default=default,
+                examples_multimodal_data=examples_multimodal_data,
+                examples_answers=examples_answers,
+                cot_reasoning=cot_reasoning,
+                strategy=strategy,
+                safe_mode=safe_mode,
+                progress_bar_desc="Running Bayesian scan",
+                additional_cot_instructions=additional_cot_instructions,
+            )
+            lotus.logger.info(f"Bayesian scan stopped after {scan_result.stop_index} of {len(self._obj)} items")
+            lotus.logger.info(f"Found {len(scan_result.positive_indices)} positives")
+            stats["num_items_scanned"] = scan_result.stop_index
+            stats["num_positives"] = len(scan_result.positive_indices)
+            stats["p_any_next_block"] = scan_result.p_any_next_block
+
+            pos_rank_idx = scan_result.positive_indices
+            pos_orig_idx = search_df.index.take(pos_rank_idx)
+
+            new_df = self._obj.loc[pos_orig_idx]
+            new_df.attrs["index_dirs"] = self._obj.attrs.get("index_dirs", None)
+            return new_df
+
         if find_top_k:
             if lotus.settings.rm is None:
                 raise ValueError("RM must be set in settings for find_top_k")
